@@ -8,6 +8,12 @@
   and its base (e.g. `main`) otherwise. Never integrate branches owned by non-maintainers
   or other agents yourself; tell the user and let them decide how to proceed.
 
+## Course Rules
+
+- Course content is written in Simplified Chinese (简体中文).
+- Git commit messages are written in English.
+- Commit once after completing each lesson; push only when asked.
+
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.
 - `~/.jcode/builds/current/jcode` is the active local/source-build channel; self-dev builds and `scripts/install_release.sh` point the launcher here.

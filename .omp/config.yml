@@ -1,6 +1,6 @@
 modelRoles:
   vision: opencode-go/mimo-v2.5:high
-  default: opencode-go/deepseek-v4-flash:max
+  default: opencode-go/deepseek-v4-pro:max
   slow: opencode-go/deepseek-v4-pro:max
   plan: opencode-go/deepseek-v4-pro:max
   designer: opencode-go/deepseek-v4-pro:max
