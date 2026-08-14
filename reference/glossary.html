@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>术语表 · jcode 架构课程</title>
+<link rel="stylesheet" href="../assets/lessons/styles.css">
+</head>
+<body>
+<main>
+
+<header class="lesson-header">
+  <p class="lesson-kicker">Reference · Glossary</p>
+  <h1>jcode 架构术语表</h1>
+  <p class="subtitle">读 jcode 代码时会反复遇到的术语。术语一旦定义，后续课程统一使用，不再重复解释。Python 类比仅为辅助理解，语义并不完全等价。</p>
+</header>
+
+<h2>一、Rust 工程结构</h2>
+
+<dl>
+<dt>workspace（工作区）</dt>
+<dd>一个 Cargo.toml 声明的多 crate 项目集合，共享一个 target/ 构建目录和一个 Cargo.lock。jcode 的 workspace 有 84 个成员（1 个根 crate + 83 个子 crate），声明在根 <code>Cargo.toml</code> 的 <code>[workspace] members</code>。类比：Python 的 monorepo。</dd>
+
+<dt>crate（箱）</dt>
+<dd>Rust 的编译单元，一个 crate = 一个库（lib）或一个二进制（bin），有自己的 Cargo.toml。类比：Python 的发行包。</dd>
+
+<dt>module（模块）</dt>
+<dd>crate 内部的命名空间组织单位（<code>mod foo;</code> 对应 <code>foo.rs</code> 或 <code>foo/</code> 目录）。类比：Python 的模块/子包。</dd>
+
+<dt>re-export / <code>pub use</code>（再导出）</dt>
+<dd>把一个（往往是别的 crate 的）名字在当前位置重新公开，让调用方用一条路径就能访问。jcode 四层洋葱的粘合剂：每层 <code>pub use</code> 下一层的全部模块。类比：<code>__init__.py</code> 里写 <code>from base import *</code>。</dd>
+
+<dt>feature（特性开关）</dt>
+<dd>Cargo 的条件编译开关（如 <code>embeddings</code>、<code>dev-bins</code>），在 Cargo.toml <code>[features]</code> 声明。类比：Python 的 optional dependency。</dd>
+
+<dt>cfg(...)（条件编译）</dt>
+<dd>按平台/特性决定某段代码是否参与编译（如 <code>#[cfg(target_os = "macos")]</code>）。类比：<code>if sys.platform == "darwin"</code>，但发生在编译期，其他平台的二进制里根本不含这段代码。</dd>
+</dl>
+
+<h2>二、读代码必需的 Rust 语法</h2>
+
+<dl>
+<dt>trait / impl</dt>
+<dd>trait 定义一组行为契约，<code>impl Trait for Type</code> 为某类型实现它。类比：Python 的 ABC / typing.Protocol + 多继承。</dd>
+
+<dt><code>dyn Trait</code>（trait object）</dt>
+<dd>通过 trait 引用的多态：<code>Arc&lt;dyn Tool&gt;</code> 是"任何实现了 Tool 的东西"的共享引用。类比：Python 里持有接口类型并调用方法（鸭子类型，但编译期检查）。</dd>
+
+<dt>Arc&lt;T&gt;</dt>
+<dd>原子引用计数共享指针，多线程安全共享同一份数据。类比：Python 对象的引用计数（所有对象天然共享）。</dd>
+
+<dt>Mutex / RwLock</dt>
+<dd>互斥锁 / 读写锁，配合 Arc 实现线程安全共享可变状态。类比：<code>threading.Lock</code> / <code>RLock</code>。</dd>
+
+<dt>async fn / .await</dt>
+<dd>异步函数与等待点。类比：<code>async def</code> / <code>await</code>。</dd>
+
+<dt>tokio</dt>
+<dd>Rust 最主流的异步运行时（事件循环 + 任务调度 + 网络 IO）。jcode 的 daemon、agent loop 都跑在 tokio 上。类比：asyncio。</dd>
+
+<dt>channel（mpsc / broadcast）</dt>
+<dd>mpsc = 多生产者单消费者队列；broadcast = 一对多广播（有容量，慢消费者丢消息）。类比：<code>asyncio.Queue</code> / 简易 pub-sub。</dd>
+
+<dt>Stream / EventStream</dt>
+<dd>异步迭代器（<code>Stream&lt;Item = ...&gt;</code>），逐个产出值。类比：async generator。jcode 里 provider 的流式输出就是 <code>EventStream</code>。</dd>
+
+<dt>derive 宏（serde）</dt>
+<dd><code>#[derive(Serialize, Deserialize)]</code> 自动生成序列化代码。serde 类比：pydantic（但编译期生成、零反射）。</dd>
+
+<dt>clap</dt>
+<dd>Rust 最主流的 CLI 参数解析库（jcode 的 <code>Args</code>/<code>Command</code> 用它定义）。类比：argparse。</dd>
+
+<dt>Result / anyhow</dt>
+<dd>Result 是 Rust 的错误类型（Ok/Err，类比 Python 异常但显式传播）；anyhow 是应用级"任意错误"的便捷包装。</dd>
+</dl>
+
+<h2>三、进程与通信</h2>
+
+<dl>
+<dt>daemon（守护进程）</dt>
+<dd>常驻后台进程。jcode 的 <code>jcode serve</code> 就是 daemon：持有所有会话，客户端进程连上它干活。类比：长期运行的服务器进程。</dd>
+
+<dt>Unix socket / named pipe</dt>
+<dd>本机进程间通信通道（IPC），不走 TCP。Unix/macOS 用 Unix domain socket，Windows 用命名管道。jcode 的 <code>jcode-transport</code> crate 把两者统一成同一套 API。</dd>
+
+<dt>NDJSON</dt>
+<dd>Newline-Delimited JSON：每行一个 JSON 对象。jcode 客户端与 daemon 之间的线协议就是 NDJSON（<code>jcode-protocol</code> 定义 Request/ServerEvent）。类比：<code>json.dumps</code> + 每行一条。</dd>
+
+<dt>client / server 分离</dt>
+<dd>瘦客户端（TUI 窗口、connect REPL、api-bridge）+ 胖服务端（daemon 持有会话与 agent）。一个 daemon 可被多个客户端进程同时连接。</dd>
+</dl>
+
+<h2>四、jcode 领域术语</h2>
+
+<dl>
+<dt>agent（代理）</dt>
+<dd>执行一轮对话循环的核心对象：构建 prompt → 调模型 → 解析 → 执行工具 → 循环，直到不再调用工具。</dd>
+
+<dt>tool / Registry</dt>
+<dd>工具 = agent 可调用的能力（read/bash/edit/webfetch…），实现 <code>Tool</code> trait；Registry 是按名字查工具的注册表（<code>Arc&lt;RwLock&lt;HashMap&lt;String, Arc&lt;dyn Tool&gt;&gt;&gt;&gt;</code>）。</dd>
+
+<dt>provider</dt>
+<dd>模型服务适配层：<code>Provider</code> trait 统一各家 API（Anthropic/OpenAI/Gemini/Copilot…），<code>MultiProvider</code> 聚合多个实现并做路由/故障转移。</dd>
+
+<dt>session（会话）</dt>
+<dd>一次对话的持久状态：消息历史、compaction 状态、模型、工作目录等，可跨进程恢复（<code>--resume</code>）。</dd>
+
+<dt>Bus（总线）</dt>
+<dd>进程内全局广播（tokio broadcast），发布状态类事件（工具开始/完成、todo 更新、子 agent 状态），TUI/server 订阅消费。</dd>
+
+<dt>DTO</dt>
+<dd>Data Transfer Object：纯数据 + serde 序列化、无 IO 无行为。jcode 把跨 crate 共享的稳定数据结构抽成 <code>jcode-*-types</code> 叶子 crate。</dd>
+
+<dt>turn（轮）</dt>
+<dd>agent 从"收到用户消息"到"本轮全部工具执行完、生成最终回复"的一次完整循环。</dd>
+
+<dt>compaction（压缩）</dt>
+<dd>上下文超限时把旧对话压缩成摘要，腾出 token 预算继续工作。</dd>
+
+<dt>harness（主机架）</dt>
+<dd>指 jcode 这一类"给 LLM 装上手和脚"的框架本身（agent loop + 工具 + TUI + 会话管理的总称）。</dd>
+</dl>
+
+<footer class="lesson-footer">
+  <p>相关：<a href="repo-map.html">仓库地图</a> · <a href="../lessons/0001-jcode-architecture-map.html">第 1 课 · 架构地图</a></p>
+  <p>术语有歧义或缺失？直接问你的 agent。</p>
+</footer>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>仓库地图 · jcode 架构课程</title>
+<link rel="stylesheet" href="../assets/lessons/styles.css">
+</head>
+<body>
+<main>
+
+<header class="lesson-header">
+  <p class="lesson-kicker">Reference · Repo Map</p>
+  <h1>jcode 仓库地图</h1>
+  <p class="subtitle">四层结构、crate 家族、关键文件索引、「改 X 去哪」速查。行号基于 commit <code>4b016f2f</code>（v0.76.0）。</p>
+</header>
+
+<h2>1. 四层洋葱</h2>
+
+<pre>
+┌────────────────────────────────────────────────────────────┐
+│ L1  jcode（根 crate，src/）        CLI + 入口 + 参数分发      │
+│      src/main.rs · src/cli/args.rs · dispatch.rs · commands │
+└──────────────────────────────┬─────────────────────────────┘
+                               │ pub use jcode_tui::*   (src/lib.rs:22)
+┌──────────────────────────────▼─────────────────────────────┐
+│ L2  jcode-tui（表现层）        终端 UI + 视频导出             │
+│      crates/jcode-tui/src/tui/ · video_export              │
+└──────────────────────────────┬─────────────────────────────┘
+                               │ pub use jcode_app_core::* (lib.rs:23)
+┌──────────────────────────────▼─────────────────────────────┐
+│ L3  jcode-app-core（上层核心）  server / tool / agent         │
+│      agent.rs · tool/ · server.rs · ambient/ · replay/     │
+└──────────────────────────────┬─────────────────────────────┘
+                               │ pub use jcode_base::*    (lib.rs:24)
+┌──────────────────────────────▼─────────────────────────────┐
+│ L4  jcode-base（基础层）      provider · session · config ·   │
+│      memory · prompt · bus · transport · message · auth    │
+└────────────────────────────────────────────────────────────┘
+</pre>
+
+<p>依赖方向只允许「上 → 下」：L1 可以依赖 L2/L3/L4，反过来不行。代码里到处写的 <code>crate::session</code>、<code>crate::config</code>，真实定义在 L4，靠逐层 <code>pub use</code> 转发到上层。这一层的动机是编译期成本：把最大的 rustc 编译单元拆开，基础层注释原文是「the largest compilation unit (and its peak memory) is roughly halved」<span class="cite">jcode-base/src/lib.rs:6</span>。</p>
+
+<h2>2. 叶子 crate 家族（83 个子 crate）</h2>
+
+<table>
+<thead><tr><th>家族</th><th>代表</th><th>规则</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>jcode-*-types</code>（数据契约）</td>
+  <td>jcode-session-types、jcode-message-types、jcode-tool-types、jcode-usage-types、jcode-gateway-types、jcode-ambient-types、jcode-memory-types</td>
+  <td>只放 DTO：serde + 纯函数。禁 IO/网络/进程/TUI/全局状态。只允许依赖外部轻库和兄弟 types crate；<code>scripts/check_dependency_boundaries.py</code> 是守卫<span class="cite">CRATE_OWNERSHIP_BOUNDARIES.md:16-27,98-102</span>。</td>
+</tr>
+<tr>
+  <td><code>jcode-provider-*</code>（模型适配）</td>
+  <td>jcode-provider-core（Provider trait + 模型表/定价/路由）、jcode-provider-anthropic / -openai / -gemini / -copilot / -bedrock / -openrouter（元数据）、jcode-provider-*-runtime（trait 实现）</td>
+  <td>core 是纯逻辑；runtime 才实现 <code>Provider</code> trait。</td>
+</tr>
+<tr>
+  <td><code>jcode-tui-*</code>（UI 组件）</td>
+  <td>jcode-tui-core、-render、-messages、-markdown、-mermaid、-permissions、-tool-display、-session-picker、-usage-overlay、-anim…</td>
+  <td>ratatui 之上的独立 widget，被 L2 组装。</td>
+</tr>
+<tr>
+  <td>基础设施</td>
+  <td>jcode-protocol（线协议）、jcode-transport（socket 抽象）、jcode-harness-api(+server)（稳定 API 桥）、jcode-sdk、jcode-storage、jcode-logging、jcode-update-core、jcode-build-*、jcode-command-risk（危险命令判定）</td>
+  <td>跨层共享的机制，不属于领域行为。</td>
+</tr>
+</tbody>
+</table>
+
+<p>根 crate 之外的非 Rust 代码：<code>telemetry-worker/</code>（TypeScript，Cloudflare）、<code>sdk/typescript/</code>（TS SDK）、<code>ios/</code>（Swift）、<code>crates/jcode-desktop2</code>（桌面壳）。</p>
+
+<h2>3. 关键结构速查（file:line）</h2>
+
+<table>
+<thead><tr><th>概念</th><th>位置</th><th>一句话</th></tr></thead>
+<tbody>
+<tr><td>入口</td><td><code>src/main.rs:137</code> → <code>src/cli/startup.rs:18</code> → <code>src/cli/dispatch.rs:65</code></td><td>构建 tokio runtime，解析参数，分发子命令。</td></tr>
+<tr><td>CLI 定义</td><td><code>src/cli/args.rs:33,122</code>（Args / Command）</td><td>clap 定义全部子命令。</td></tr>
+<tr><td>Server</td><td><code>crates/jcode-app-core/src/server.rs:651</code>（struct）、<code>:2229</code>（run）</td><td>daemon 本体；<code>sessions: Arc&lt;RwLock&lt;HashMap&lt;String, Arc&lt;Mutex&lt;Agent&gt;&gt;&gt;&gt;</code>（:664）。</td></tr>
+<tr><td>Agent</td><td><code>crates/jcode-app-core/src/agent.rs:181</code></td><td>一轮对话循环的核心对象（provider + registry + session）。</td></tr>
+<tr><td>主循环</td><td><code>crates/jcode-app-core/src/agent/turn_loops.rs:31</code>（阻塞）、<code>turn_streaming_mpsc.rs:79</code>（流式）</td><td>构建 prompt → 调 provider → 解析 → 执行工具 → 循环。</td></tr>
+<tr><td>Registry</td><td><code>crates/jcode-app-core/src/tool/mod.rs:135</code>（struct）、<code>:246</code>（base_tools 注册）、<code>:618</code>（execute）</td><td>工具注册表：<code>HashMap&lt;String, Arc&lt;dyn Tool&gt;&gt;</code>；内置约 25 个 + 会话级 + MCP 动态。</td></tr>
+<tr><td>Tool trait</td><td><code>crates/jcode-tool-core/src/lib.rs:145</code></td><td>name/description/parameters_schema/execute。</td></tr>
+<tr><td>Provider trait</td><td><code>crates/jcode-provider-core/src/lib.rs</code>（:56 EventStream）</td><td>统一各家模型 API；流式输出 = <code>EventStream</code>。</td></tr>
+<tr><td>MultiProvider</td><td><code>crates/jcode-base/src/provider/mod.rs:331</code>；分发 <code>dispatch.rs:57</code></td><td>聚合多个 provider，路由 + 故障转移。</td></tr>
+<tr><td>Session</td><td><code>crates/jcode-base/src/session.rs:105</code></td><td>消息历史 + compaction + 模型 + 工作目录，可持久化恢复。</td></tr>
+<tr><td>Bus</td><td><code>crates/jcode-base/src/bus.rs:468</code>（Bus）、<code>:394</code>（BusEvent）</td><td>进程内广播：工具状态、todo、子 agent 事件。</td></tr>
+<tr><td>线协议</td><td><code>crates/jcode-protocol/src/wire.rs:38</code>（Request）、<code>:734</code>（ServerEvent）</td><td>NDJSON over socket。</td></tr>
+<tr><td>传输</td><td><code>crates/jcode-transport/src/</code>（unix.rs / windows.rs）</td><td>Unix socket / Windows 命名管道的统一 API。</td></tr>
+<tr><td>审批</td><td><code>crates/jcode-base/src/safety.rs:150</code>（SafetySystem）</td><td>ambient 会话的请求-批准流；常规会话只有策略过滤 + 钩子。</td></tr>
+<tr><td>Harness API</td><td><code>crates/jcode-harness-api/</code> + <code>jcode-harness-api-server/</code>（run_bridge lib.rs:101）</td><td>给 TS SDK 用的稳定 API socket → 翻译成内部协议。</td></tr>
+</tbody>
+</table>
+
+<h2>4. 进程模型</h2>
+
+<pre>
+                 ┌──────────────┐   NDJSON over Unix socket    ┌──────────────────┐
+ 交互式使用：      │ TUI 客户端    │ ───────────────────────────▶ │ daemon（serve）   │
+                 │ （每窗口一进程）│  Request/ServerEvent         │ 持有全部 Session   │
+                 └──────────────┘                              │ 持有 Agent 实例    │
+                 ┌──────────────┐                              └──────────────────┘
+                 │ connect REPL │ ───────────────────────────▶            ▲
+                 └──────────────┘                                         │
+                 ┌──────────────┐      API socket → 翻译                 │
+                 │ api-bridge   │ ──────────────（TS SDK 入口）───────────┘
+                 └──────────────┘
+
+ 例外：`jcode run '<prompt>'` 不走 daemon —— 同一进程内 Registry + Agent
+       跑一轮就退出（src/cli/commands.rs:2419）。
+</pre>
+
+<p>启动流程：无子命令启动时先探测 <code>server_is_running()</code>，没有就 <code>spawn_server()</code> 拉起 daemon（dispatch.rs:1024,1267）。多窗口 = 多个客户端进程 subscribe 同一 daemon 的不同/同一会话。</p>
+
+<h2>5. 「改 X 去哪」速查</h2>
+
+<table>
+<thead><tr><th>任务</th><th>位置</th></tr></thead>
+<tbody>
+<tr><td>新增内置工具</td><td><code>crates/jcode-app-core/src/tool/</code> 实现 Tool trait + <code>tool/mod.rs:246</code> base_tools 注册</td></tr>
+<tr><td>接入新模型服务商</td><td>新建 <code>crates/jcode-provider-&lt;name&gt;-runtime/</code> 实现 Provider trait + <code>jcode-base/src/provider/</code> 装配进 MultiProvider</td></tr>
+<tr><td>加/改 CLI 参数</td><td><code>src/cli/args.rs</code> + <code>src/cli/dispatch.rs</code></td></tr>
+<tr><td>改 TUI 工具状态显示</td><td><code>crates/jcode-tui/src/tui/</code> + <code>jcode-tui-tool-display</code></td></tr>
+<tr><td>改会话持久化格式</td><td><code>crates/jcode-session-types</code>（DTO）+ <code>jcode-base/src/session.rs</code>（读写逻辑）</td></tr>
+<tr><td>bash 危险命令判定</td><td><code>crates/jcode-command-risk</code> + <code>crates/jcode-app-core/src/tool/bash_destructive_gate.rs</code></td></tr>
+<tr><td>加服务端协议事件</td><td><code>crates/jcode-protocol/src/wire.rs</code> + server 发射点 + TUI 消费点</td></tr>
+<tr><td>改记忆/上下文注入</td><td><code>crates/jcode-base/src/memory*.rs</code>、<code>memory_agent.rs</code>、<code>prompt.rs</code></td></tr>
+<tr><td>改模型定价/路由</td><td><code>crates/jcode-provider-core/src/pricing.rs</code>、<code>selection.rs</code></td></tr>
+<tr><td>改 <code>jcode run</code> 行为</td><td><code>src/cli/commands.rs:2419</code> + <code>agent/turn_execution.rs</code></td></tr>
+<tr><td>新增会话级工具（如 swarm）</td><td>实现 Tool trait + <code>Registry::new</code>（tool/mod.rs:310+）按会话补充</td></tr>
+<tr><td>改 MCP 集成</td><td><code>crates/jcode-base/src/mcp/</code> + <code>tool/mod.rs:1008</code> register_mcp_tools</td></tr>
+</tbody>
+</table>
+
+<h2>6. 易错点（指挥 AI 前必读）</h2>
+
+<ul>
+  <li>没有 <code>attach</code> 子命令。attach 语义由 <code>--resume &lt;id&gt;</code> 承担（TUI 发 <code>Request::Subscribe{target_session_id}</code>）。</li>
+  <li><code>jcode run</code> 不经 daemon，<code>repl</code> 同理；只有 TUI/connect 路径走 daemon。「所有会话都在 daemon」是错的。</li>
+  <li>types crate 是叶子：让 <code>jcode-session-types</code> 依赖根 crate 会被依赖边界守卫拦下。</li>
+  <li>四层里的代码到处写 <code>crate::xxx</code>：改基础层模块时，上层通过 re-export 自动可见，但编译成本按层扩散（改 jcode-base 会重编 L3/L2/L1）。</li>
+  <li>jcode-protocol 注释里的 "Agent socket: Inter-agent communication" 疑似遗留：Server::run 只绑 main + debug 两个 socket，agent 间通信走 main socket 的 comm_* 请求。</li>
+</ul>
+
+<footer class="lesson-footer">
+  <p>相关：<a href="glossary.html">术语表</a> · <a href="../lessons/0001-jcode-architecture-map.html">第 1 课 · 架构地图</a></p>
+  <p>行号会随上游更新漂移，找不到时按符号名搜。</p>
+</footer>
+
+</main>
+</body>
+</html>

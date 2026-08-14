@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · jcode 架构地图</title>
+<link rel="stylesheet" href="../assets/lessons/styles.css">
+</head>
+<body>
+<main>
+
+<header class="lesson-header">
+  <p class="lesson-kicker">Lesson 0001 · 架构地图</p>
+  <h1>jcode 架构地图：四层洋葱与两条运行路径</h1>
+  <p class="subtitle">本课目标：在脑中建立 jcode 的仓库地图——任何功能属于哪一层、哪个 crate、动了它会影响谁。这是指挥 AI 修改代码、审核它提交的 diff 的共同前提。</p>
+</header>
+
+<h2>1. 一张快照</h2>
+
+<p>jcode 是一个 Rust 写的终端 AI 编码代理（"harness"）：常驻守护进程 + 终端 UI，agent 负责循环调用大模型和执行工具。本仓库是上游 <a href="https://github.com/1jehuang/jcode">1jehuang/jcode</a> 的 fork，当前 v0.76.0，约 7 千个提交。</p>
+
+<table>
+<thead><tr><th>事实</th><th>数字</th></tr></thead>
+<tbody>
+<tr><td>workspace 成员（crate）</td><td>84 个：1 个根 crate + 83 个子 crate<span class="cite">Cargo.toml:9-93</span></td></tr>
+<tr><td>语言</td><td>Rust（edition 2024）+ TypeScript（telemetry-worker、SDK）+ Swift（ios）</td></tr>
+<tr><td>谱系</td><td>设计空间原点：<a href="https://github.com/earendil-works/pi">pi</a>（TypeScript）→ <a href="https://github.com/can1357/oh-my-pi">omp</a>（pi 的 Rust 移植，见其 porting-from-pi-mono.md）→ jcode（同物种：Rust 终端 coding-agent harness）</td></tr>
+</tbody>
+</table>
+
+<h2>2. 三个术语，先对齐</h2>
+
+<p>读 jcode 代码前只需要三个 Rust 工程术语，完整术语表在 <a href="../reference/glossary.html">glossary.html</a>：</p>
+
+<ul>
+<li><strong>workspace</strong>：一个 Cargo.toml 管理的多 crate 项目集合（类比 Python monorepo）。</li>
+<li><strong>crate</strong>：编译单元，每个子目录 <code>crates/jcode-*</code> 就是一个 crate（类比 Python 发行包）。</li>
+<li><strong>module</strong>：crate 内的命名空间（类比 Python 模块）。</li>
+</ul>
+
+<h2>3. 四层洋葱（最重要的图）</h2>
+
+<p>84 个 crate 不是平铺的。核心是一条四层链，每一层用一行 <code>pub use</code> 把下一层整体再导出：</p>
+
+<pre>
+L1  jcode（根 crate，src/）            CLI、参数、子命令分发
+        │  pub use jcode_tui::*;        src/lib.rs:22
+L2  jcode-tui                        终端 UI、视频导出
+        │  pub use jcode_app_core::*;  crates/jcode-tui/src/lib.rs:23
+L3  jcode-app-core                    server、tool、agent（运行时上层）
+        │  pub use jcode_base::*;      crates/jcode-app-core/src/lib.rs:24
+L4  jcode-base                        provider、session、config、memory、prompt、bus
+</pre>
+
+<p>三个后果：</p>
+
+<ol>
+<li><strong>依赖只许向下</strong>：L1 可以依赖 L2/L3/L4，反过来不行。所以代码里到处是 <code>crate::session</code>、<code>crate::config</code>——真实定义在 L4，被逐层 re-export 上来。</li>
+<li><strong>这是编译期决策，不是审美</strong>：把最大的 rustc 编译单元拆开，「the largest compilation unit (and its peak memory) is roughly halved」<span class="cite">jcode-base/src/lib.rs:6</span>。仓库的拆分规范文档写得更细<span class="cite">docs/CRATE_OWNERSHIP_BOUNDARIES.md</span>。</li>
+<li><strong>其余 79 个 crate 是叶子</strong>，挂在不同层上：<code>jcode-*-types</code>（纯数据 DTO，禁止 IO/网络/进程，有脚本守卫依赖边界）、<code>jcode-provider-*</code>（各家模型适配）、<code>jcode-tui-*</code>（UI 组件）、基础设施（protocol/transport/sdk/harness-api…）。</li>
+</ol>
+
+<div class="note"><span class="label">Python 类比</span>
+每层 lib.rs 的 <code>pub use jcode_xxx::*</code> ≈ 每层 <code>__init__.py</code> 里写 <code>from jcode_base import *</code>——上层不用改 import 路径，下层模块自动可见。</div>
+
+<h2>4. 进程模型：两条运行路径</h2>
+
+<p>jcode 是客户端/服务端架构，但有一个高频例外：</p>
+
+<pre>
+路径 A（交互式，走 daemon）：
+  TUI 客户端进程 ──NDJSON over Unix socket──▶ jcode serve（daemon）
+  （每窗口一个进程）   Request/ServerEvent      持有全部 Session 和 Agent 实例
+
+路径 B（jcode run，例外，不走 daemon）：
+  同一进程内：Registry + Agent 跑一轮 → 打印结果 → 退出
+  src/cli/commands.rs:2419 run_single_message_command
+</pre>
+
+<p>要点：</p>
+
+<ul>
+<li>daemon 启动：客户端先探测 <code>server_is_running()</code>，没有就 <code>spawn_server()</code> 拉起<span class="cite">src/cli/dispatch.rs:1024,1267</span>。daemon 本体是 <code>Server</code>，会话表是 <code>HashMap&lt;String, Arc&lt;Mutex&lt;Agent&gt;&gt;&gt;</code><span class="cite">server.rs:651,664</span>。</li>
+<li>线协议：换行分隔的 JSON（NDJSON），请求/事件枚举定义在 <code>Request</code> / <code>ServerEvent</code><span class="cite">crates/jcode-protocol/src/wire.rs:38,734</span>；传输层在 <code>jcode-transport</code>（Unix socket / Windows 命名管道统一 API）。</li>
+<li>多窗口 = 多个客户端进程 subscribe 同一 daemon；<strong>没有 <code>attach</code> 子命令</strong>，attach 语义由 <code>--resume &lt;id&gt;</code> 承担。</li>
+<li><code>jcode run</code>、<code>repl</code> 在客户端进程内自建 agent，与 daemon 无关。给 AI 下指令时别说「改 attach 命令」或「让 run 走 daemon 会话」。</li>
+</ul>
+
+<h2>5. 核心概念速览（后续课逐一深入）</h2>
+
+<table>
+<thead><tr><th>概念</th><th>一行职责</th><th>位置</th></tr></thead>
+<tbody>
+<tr><td>Agent</td><td>一轮对话循环的核心对象</td><td><code>agent.rs:181</code></td></tr>
+<tr><td>Registry</td><td>工具注册表（名字 → Tool 实现）</td><td><code>tool/mod.rs:135</code></td></tr>
+<tr><td>Tool trait</td><td>所有工具的统一接口</td><td><code>jcode-tool-core/src/lib.rs:145</code></td></tr>
+<tr><td>Provider / MultiProvider</td><td>统一各家模型 API + 路由/故障转移</td><td><code>provider/mod.rs:331</code></td></tr>
+<tr><td>Session</td><td>会话持久状态（历史、compaction、模型）</td><td><code>jcode-base/src/session.rs:105</code></td></tr>
+<tr><td>Bus</td><td>进程内广播（工具状态、todo、子 agent）</td><td><code>jcode-base/src/bus.rs:468</code></td></tr>
+</tbody>
+</table>
+
+<p>完整索引（含更多文件与「改 X 去哪」速查）在 <a href="../reference/repo-map.html">repo-map.html</a>。</p>
+
+<h2>练习 A · 给任务归位（自查）</h2>
+
+<p>下面 5 个修改任务，先自己回答「动哪一层、哪个文件」，再展开答案核对。这是你以后给 AI 下指令时要做的事。</p>
+
+<details class="card">
+<summary>任务 1：给 agent 新增一个内置工具（比如天气查询）</summary>
+<div class="answer-line"><span class="where">L3 · crates/jcode-app-core/src/tool/</span> —— 新建文件实现 <code>Tool</code> trait，并在 <code>tool/mod.rs:246</code> 的 <code>base_tools</code> 里注册。</div>
+</details>
+
+<details class="card">
+<summary>任务 2：接入一个新的模型服务商（比如 DeepSeek）</summary>
+<div class="answer-line"><span class="where">新建 crates/jcode-provider-deepseek-runtime/ + L4 的 jcode-base/src/provider/</span> —— runtime crate 实现 <code>Provider</code> trait，在 MultiProvider 装配处接入。</div>
+</details>
+
+<details class="card">
+<summary>任务 3：新增一个 CLI 参数 <code>--foo</code></summary>
+<div class="answer-line"><span class="where">L1 · src/cli/args.rs</span> —— clap 的 Args/Command 定义，再在 <code>dispatch.rs</code> 处理分支。</div>
+</details>
+
+<details class="card">
+<summary>任务 4：修改会话持久化格式（session 存储）</summary>
+<div class="answer-line"><span class="where">jcode-session-types（DTO）+ L4 · jcode-base/src/session.rs</span> —— 数据结构在 types 叶子 crate，读写行为在 base。</div>
+</details>
+
+<details class="card">
+<summary>任务 5：给 TUI 的工具执行状态换个显示样式</summary>
+<div class="answer-line"><span class="where">L2 · crates/jcode-tui/src/tui/ + jcode-tui-tool-display</span> —— 表现层及其组件 crate，别去动 L3/L4。</div>
+</details>
+
+<h2>练习 B · 检索练习</h2>
+
+<p>凭记忆作答，不要翻回去看。答错说明地图还没进长期记忆——重看对应小节再试。</p>
+
+<div class="quiz">
+  <p class="quiz-q" data-correct="0">四层洋葱中，哪种依赖方向是允许的？</p>
+  <ul class="quiz-opts">
+    <li><button class="quiz-opt">表现层依赖基础层</button></li>
+    <li><button class="quiz-opt">基础层依赖表现层</button></li>
+    <li><button class="quiz-opt">类型层依赖入口层</button></li>
+    <li><button class="quiz-opt">入口层依赖类型层</button></li>
+  </ul>
+  <p class="quiz-feedback"></p>
+
+  <p class="quiz-q" data-correct="2"><code>agent.rs</code>（Agent 与主循环）属于洋葱第几层？</p>
+  <ul class="quiz-opts">
+    <li><button class="quiz-opt">洋葱第一层</button></li>
+    <li><button class="quiz-opt">洋葱第二层</button></li>
+    <li><button class="quiz-opt">洋葱第三层</button></li>
+    <li><button class="quiz-opt">洋葱第四层</button></li>
+  </ul>
+  <p class="quiz-feedback"></p>
+
+  <p class="quiz-q" data-correct="0"><code>jcode run '&lt;prompt&gt;'</code> 是如何执行的？</p>
+  <ul class="quiz-opts">
+    <li><button class="quiz-opt">在自己进程内执行</button></li>
+    <li><button class="quiz-opt">在守护进程内执行</button></li>
+    <li><button class="quiz-opt">在桥接进程内执行</button></li>
+    <li><button class="quiz-opt">在网关进程内执行</button></li>
+  </ul>
+  <p class="quiz-feedback"></p>
+
+  <p class="quiz-q" data-correct="0">客户端与守护进程之间的线协议是？</p>
+  <ul class="quiz-opts">
+    <li><button class="quiz-opt">换行分隔的JSON</button></li>
+    <li><button class="quiz-opt">换行分隔的YAML</button></li>
+    <li><button class="quiz-opt">定长二进制帧格式</button></li>
+    <li><button class="quiz-opt">不定长消息帧格式</button></li>
+  </ul>
+  <p class="quiz-feedback"></p>
+</div>
+
+<h2>练习 C · 动手验证地图（5 分钟）</h2>
+
+<div class="card skill">
+<p>打开下面三个文件，确认地图上的锚点真实存在。不用读懂全部代码，只需找到结构体定义那一行：</p>
+<ol>
+<li><code>crates/jcode-app-core/src/agent.rs</code> → 找 <code>pub struct Agent</code>（:181）</li>
+<li><code>crates/jcode-app-core/src/tool/mod.rs</code> → 找 <code>pub struct Registry</code>（:135）</li>
+<li><code>crates/jcode-app-core/src/server.rs</code> → 找 <code>pub struct Server</code>（:651）和 <code>pub async fn run</code>（:2229）</li>
+</ol>
+<p>顺手在 agent.rs 顶部扫一眼 <code>use</code> 语句——它们会暴露这一层依赖了哪些兄弟 crate。看完后把这三个结构体各自持有的一两个字段读出来，你就是在做审核 diff 的初级版本了。</p>
+</div>
+
+<h2>本课主阅读</h2>
+
+<ul>
+<li><a href="https://doc.rust-lang.org/book/ch07-00-managing-growing-projects-with-packages-crates-and-modules.html">The Rust Book 第 7 章：包、crate 与模块</a>——本课 Rust 术语的系统版本，必读。</li>
+<li><a href="https://jcode.sh/docs">jcode.sh/docs</a>——上游官方文档，之后每节课的默认对照。</li>
+<li>参考文档：<a href="../reference/repo-map.html">repo-map.html</a>（完整索引与速查）、<a href="../reference/glossary.html">glossary.html</a>（术语表）。</li>
+</ul>
+
+<footer class="lesson-footer">
+<p><strong>复习提醒</strong>：明天或下周，不看本课重做练习 B 的 4 道题——间隔 + 检索才是把地图刻进长期记忆的方式。之后每节课开始前都会插一两道旧题。</p>
+<p><strong>下一课预告</strong>：走进 L3 的 <code>agent/</code>，看一轮 turn 的完整生命周期（构建 prompt → 调 provider → 解析流 → 执行工具）。</p>
+<p>任何一节没看懂，直接问你的 agent——它是你的老师，能带你在代码里找到任何一段逻辑。</p>
+</footer>
+
+<script src="../assets/lessons/quiz.js"></script>
+</body>
+</html>
