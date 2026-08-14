@@ -42,3 +42,17 @@ Two things that waste time otherwise:
 - Confirm which binary you are actually inspecting. `strings` on
   `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
   with `readlink -f` first.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub issues; use the `gh` CLI for all operations. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical labels, each equal to its name: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: one root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
